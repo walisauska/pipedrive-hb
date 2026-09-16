@@ -1,0 +1,20 @@
+{
+  "name": "pipedrive-cnpj-automation",
+  "version": "1.0.0",
+  "description": "Automação que consulta CNPJ na ReceitaWS e preenche campos no Pipedrive automaticamente",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "setup-fields": "node scripts/setup-fields.js"
+  },
+  "keywords": ["pipedrive", "cnpj", "receitaws", "webhook", "automation"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
