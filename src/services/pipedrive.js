@@ -185,6 +185,19 @@ async function addNote(entityType, entityId, content) {
   return pipedriveRequest('POST', '/notes', body, true);
 }
 
+/**
+ * Renomeia uma Organização (name) ou Negócio (title).
+ *
+ * Como name/title são campos padrão (não custom_fields), essa alteração não
+ * aparece em previous.custom_fields no próximo evento de webhook — então não
+ * reaciona a checagem de "CNPJ mudou" e não entra em loop.
+ */
+async function renameEntity(entityType, entityId, newName) {
+  const endpoint = entityType === 'organization' ? `/organizations/${entityId}` : `/deals/${entityId}`;
+  const body = entityType === 'organization' ? { name: newName } : { title: newName };
+  return pipedriveRequest('PUT', endpoint, body, true);
+}
+
 module.exports = {
   updateOrganization,
   updateDeal,
@@ -192,4 +205,5 @@ module.exports = {
   findDuplicateByField,
   getEntityLabel,
   addNote,
+  renameEntity,
 };

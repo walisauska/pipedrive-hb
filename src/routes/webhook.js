@@ -21,8 +21,12 @@ const { cleanCNPJ, isValidCNPJ, formatCNPJ } = require('../utils/cnpj');
 const logger = require('../utils/logger');
 const { getCompanyDomain } = require('../utils/env');
 const { consultarCNPJ } = require('../services/receitaws');
-const { updateOrganization, updateDeal, findDuplicateByField, getEntityLabel, addNote } = require('../services/pipedrive');
+const { updateOrganization, updateDeal, findDuplicateByField, getEntityLabel, addNote, renameEntity } = require('../services/pipedrive');
 const { getFieldMapping, mapReceitaToPipedrive } = require('../config/fields');
+
+// Prefixo adicionado ao nome/título quando um CNPJ duplicado é detectado,
+// para o registro se destacar já na listagem, sem precisar abrir.
+const PREFIXO_DUPLICADO = '⚠️ DUPLICADO - ';
 
 /**
  * Extrai o valor de um campo personalizado do objeto custom_fields do Pipedrive v2.
@@ -129,6 +133,15 @@ router.post('/webhook', async (req, res) => {
         `Os dados cadastrais não foram preenchidos automaticamente aqui para evitar duplicidade. ` +
         `Verifique se este não é um registro repetido antes de continuar.`
       ).catch(err => logger.error('Falha ao adicionar nota de aviso de duplicidade:', err.message));
+
+      // Marca no próprio nome/título, para aparecer já na listagem sem
+      // precisar abrir o registro. Não reprocessa em loop: name/title são
+      // campos padrão, não entram em previous.custom_fields.
+      const nomeAtual = entityType === 'organization' ? data.name : data.title;
+      if (nomeAtual && !nomeAtual.startsWith(PREFIXO_DUPLICADO)) {
+        await renameEntity(entityType, entityId, PREFIXO_DUPLICADO + nomeAtual)
+          .catch(err => logger.error('Falha ao marcar título como duplicado:', err.message));
+      }
 
       return;
     }
