@@ -124,4 +124,49 @@ async function listFields(entityType) {
   return result.data || [];
 }
 
-module.exports = { updateOrganization, updateDeal, listFields };
+/**
+ * Procura por OUTRA Organização/Negócio (diferente de excludeId) que já
+ * tenha exatamente o mesmo valor no campo informado. Usado para detectar
+ * CNPJ duplicado antes de preencher os dados automaticamente.
+ *
+ * @param {'organization'|'deal'} entityType
+ * @param {string} fieldKey - hash do campo a comparar (ex: CNPJ)
+ * @param {string} value - valor exato a buscar
+ * @param {number|string} excludeId - ID da entidade atual, para não se autodetectar
+ * @returns {number|null} ID da entidade duplicada encontrada, ou null se não há
+ */
+async function findDuplicateByField(entityType, fieldKey, value, excludeId) {
+  const fieldType = entityType === 'organization' ? 'organizationField' : 'dealField';
+  const endpoint = `/itemSearch/field?term=${encodeURIComponent(value)}&field_type=${fieldType}&field_key=${fieldKey}&exact_match=true&return_item_ids=true`;
+
+  const result = await pipedriveRequest('GET', endpoint, null, true);
+  const matches = (result.data || []).filter(item => String(item.id) !== String(excludeId));
+
+  return matches.length > 0 ? matches[0].id : null;
+}
+
+/**
+ * Busca o nome (Organização) ou título (Negócio) de uma entidade pelo ID.
+ */
+async function getEntityLabel(entityType, entityId) {
+  const endpoint = entityType === 'organization' ? `/organizations/${entityId}` : `/deals/${entityId}`;
+  const result = await pipedriveRequest('GET', endpoint, null, true);
+  return entityType === 'organization' ? result.data.name : result.data.title;
+}
+
+/**
+ * Adiciona uma nota de texto a uma Organização ou Negócio.
+ */
+async function addNote(entityType, entityId, content) {
+  const body = entityType === 'organization' ? { content, org_id: entityId } : { content, deal_id: entityId };
+  return pipedriveRequest('POST', '/notes', body, true);
+}
+
+module.exports = {
+  updateOrganization,
+  updateDeal,
+  listFields,
+  findDuplicateByField,
+  getEntityLabel,
+  addNote,
+};

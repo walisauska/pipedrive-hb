@@ -17,10 +17,11 @@
 const express = require('express');
 const router = express.Router();
 
-const { cleanCNPJ, isValidCNPJ } = require('../utils/cnpj');
+const { cleanCNPJ, isValidCNPJ, formatCNPJ } = require('../utils/cnpj');
 const logger = require('../utils/logger');
+const { getCompanyDomain } = require('../utils/env');
 const { consultarCNPJ } = require('../services/receitaws');
-const { updateOrganization, updateDeal } = require('../services/pipedrive');
+const { updateOrganization, updateDeal, findDuplicateByField, getEntityLabel, addNote } = require('../services/pipedrive');
 const { getFieldMapping, mapReceitaToPipedrive } = require('../config/fields');
 
 /**
@@ -107,6 +108,30 @@ router.post('/webhook', async (req, res) => {
     }
 
     logger.info(`CNPJ válido detectado: ${cleanedCNPJ} (entidade: ${entityType}, ID: ${entityId})`);
+
+    // Verifica se este CNPJ já está cadastrado em outra Organização/Negócio do
+    // mesmo tipo. Se sim, bloqueia o preenchimento automático e avisa via nota,
+    // em vez de criar um registro duplicado.
+    const duplicadoId = await findDuplicateByField(entityType, cnpjFieldKey, cleanedCNPJ, entityId);
+    if (duplicadoId) {
+      logger.warn(`CNPJ ${cleanedCNPJ} já cadastrado em outra entidade (${entityType} #${duplicadoId}), bloqueando preenchimento`);
+
+      const rotuloEntidade = entityType === 'organization' ? 'Organização' : 'Negócio';
+      const nomeDuplicado = await getEntityLabel(entityType, duplicadoId).catch(() => `#${duplicadoId}`);
+      const urlDuplicado = `https://${getCompanyDomain()}.pipedrive.com/${entityType}/${duplicadoId}`;
+
+      await addNote(
+        entityType,
+        entityId,
+        `⚠️ <b>CNPJ duplicado detectado</b><br>` +
+        `O CNPJ ${formatCNPJ(cleanedCNPJ)} já está cadastrado em outra(o) ${rotuloEntidade}: ` +
+        `<a href="${urlDuplicado}">${nomeDuplicado}</a> (#${duplicadoId}).<br>` +
+        `Os dados cadastrais não foram preenchidos automaticamente aqui para evitar duplicidade. ` +
+        `Verifique se este não é um registro repetido antes de continuar.`
+      ).catch(err => logger.error('Falha ao adicionar nota de aviso de duplicidade:', err.message));
+
+      return;
+    }
 
     // Consulta dados na ReceitaWS (com fallback BrasilAPI)
     const dadosEmpresa = await consultarCNPJ(cleanedCNPJ);
