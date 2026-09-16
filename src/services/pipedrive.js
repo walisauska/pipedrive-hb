@@ -4,6 +4,7 @@
 
 const logger = require('../utils/logger');
 const { getCompanyDomain } = require('../utils/env');
+const { cleanCNPJ } = require('../utils/cnpj');
 
 const API_TOKEN = () => process.env.PIPEDRIVE_API_TOKEN;
 const BASE_URL = () => `https://${getCompanyDomain()}.pipedrive.com/api/v2`;
@@ -125,24 +126,46 @@ async function listFields(entityType) {
 }
 
 /**
- * Procura por OUTRA Organização/Negócio (diferente de excludeId) que já
- * tenha exatamente o mesmo valor no campo informado. Usado para detectar
- * CNPJ duplicado antes de preencher os dados automaticamente.
+ * Procura por OUTRA Organização/Negócio (diferente de excludeId) cujo campo
+ * de CNPJ, depois de limpo (sem pontuação), seja igual ao CNPJ informado.
+ *
+ * Usa comparação no próprio código em vez da busca indexada do Pipedrive
+ * (itemSearch) porque o CNPJ pode estar salvo com ou sem máscara conforme
+ * quem digitou — a busca por texto do Pipedrive não normaliza isso, então
+ * "24723059000176" não encontra "24.723.059/0001-76" mesmo sendo o mesmo
+ * CNPJ. Paginando a lista inteira e comparando localmente, a checagem
+ * funciona independente de como o valor foi digitado.
  *
  * @param {'organization'|'deal'} entityType
- * @param {string} fieldKey - hash do campo a comparar (ex: CNPJ)
- * @param {string} value - valor exato a buscar
+ * @param {string} fieldKey - hash do campo de CNPJ
+ * @param {string} cleanedValue - CNPJ já limpo (só dígitos) a comparar
  * @param {number|string} excludeId - ID da entidade atual, para não se autodetectar
  * @returns {number|null} ID da entidade duplicada encontrada, ou null se não há
  */
-async function findDuplicateByField(entityType, fieldKey, value, excludeId) {
-  const fieldType = entityType === 'organization' ? 'organizationField' : 'dealField';
-  const endpoint = `/itemSearch/field?term=${encodeURIComponent(value)}&field_type=${fieldType}&field_key=${fieldKey}&exact_match=true&return_item_ids=true`;
+async function findDuplicateByField(entityType, fieldKey, cleanedValue, excludeId) {
+  const endpoint = entityType === 'organization' ? '/organizations' : '/deals';
+  const limit = 500;
+  let start = 0;
 
-  const result = await pipedriveRequest('GET', endpoint, null, true);
-  const matches = (result.data || []).filter(item => String(item.id) !== String(excludeId));
+  while (true) {
+    const result = await pipedriveRequest('GET', `${endpoint}?start=${start}&limit=${limit}`, null, true);
+    const items = result.data || [];
 
-  return matches.length > 0 ? matches[0].id : null;
+    for (const item of items) {
+      if (String(item.id) === String(excludeId)) continue;
+      const outroValor = item[fieldKey];
+      if (outroValor && cleanCNPJ(outroValor) === cleanedValue) {
+        return item.id;
+      }
+    }
+
+    const temMais = result.additional_data && result.additional_data.pagination
+      && result.additional_data.pagination.more_items_in_collection;
+    if (!temMais) break;
+    start += limit;
+  }
+
+  return null;
 }
 
 /**
