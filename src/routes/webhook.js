@@ -1,5 +1,17 @@
 /**
- * Rota de webhook para receber eventos do Pipedrive.
+ * Rota de webhook para receber eventos do Pipedrive (API de Webhooks v2).
+ *
+ * Formato real de um evento v2:
+ *   {
+ *     meta: { action: 'create'|'change'|'delete'|..., entity: 'organization'|'deal', entity_id: '12', ... },
+ *     data: { id, ..., custom_fields: { '<hash>': { type, value } | null, ... } } | null,
+ *     previous: { ...apenas os campos que mudaram... } | null,
+ *   }
+ *
+ * `data` é o estado ATUAL, sempre com o objeto de custom_fields completo.
+ * `previous` só existe em 'change' e só traz as chaves que de fato mudaram —
+ * é isso que usamos para saber se foi o CNPJ que mudou, e não outro campo
+ * (inclusive as próprias gravações que esta automação faz).
  */
 
 const express = require('express');
@@ -12,52 +24,77 @@ const { updateOrganization, updateDeal } = require('../services/pipedrive');
 const { getFieldMapping, mapReceitaToPipedrive } = require('../config/fields');
 
 /**
+ * Extrai o valor de um campo personalizado do objeto custom_fields do Pipedrive v2.
+ * @param {object|null} customFields
+ * @param {string} hash
+ * @returns {string|null}
+ */
+function getCustomFieldValue(customFields, hash) {
+  const field = customFields ? customFields[hash] : null;
+  return field ? field.value : null;
+}
+
+/**
  * POST /webhook
  *
- * Recebe eventos do Pipedrive quando uma Organização ou Negócio é atualizado.
- * Verifica se o campo CNPJ mudou e, se sim, consulta os dados e atualiza os campos.
+ * Recebe eventos do Pipedrive quando uma Organização ou Negócio é criado/atualizado.
+ * Só processa quando o campo CNPJ especificamente mudou (evita reprocessar em loop
+ * quando esta própria automação grava os demais campos, o que também dispara um evento).
  */
 router.post('/webhook', async (req, res) => {
   // Responde 200 imediatamente para evitar retries do Pipedrive
   res.status(200).json({ status: 'received' });
 
   try {
-    const { event, data, previous } = req.body;
+    const { meta, data, previous } = req.body;
 
-    // Verifica se é um evento de atualização
-    if (!event) {
-      logger.debug('Webhook recebido sem evento, ignorando');
+    if (!meta) {
+      logger.debug('Webhook recebido sem meta, ignorando');
       return;
     }
 
-    logger.info(`Evento recebido: ${event}`);
+    const { action, entity, entity_id: entityId } = meta;
+    logger.info(`Evento recebido: ${action}.${entity} (ID: ${entityId})`);
 
-    // Determina o tipo de entidade
-    let entityType = null;
-    if (event === 'updated.organization') {
-      entityType = 'organization';
-    } else if (event === 'updated.deal') {
-      entityType = 'deal';
-    } else {
-      logger.debug(`Evento "${event}" não é relevante, ignorando`);
+    // Só nos interessam criação e alteração de Organização ou Negócio
+    if (action !== 'create' && action !== 'change') {
+      logger.debug(`Ação "${action}" não é relevante, ignorando`);
       return;
     }
+    if (entity !== 'organization' && entity !== 'deal') {
+      logger.debug(`Entidade "${entity}" não é relevante, ignorando`);
+      return;
+    }
+    if (!data) {
+      logger.debug('Evento sem "data" (provável delete), ignorando');
+      return;
+    }
+
+    const entityType = entity;
+    const prefixo = entityType === 'organization' ? 'ORG' : 'DEAL';
 
     // Verifica se temos o hash do campo CNPJ configurado para esta entidade
-    const prefixo = entityType === 'organization' ? 'ORG' : 'DEAL';
     const { cnpj: cnpjFieldKey } = getFieldMapping(entityType);
     if (!cnpjFieldKey) {
       logger.error(`${prefixo}_CNPJ_FIELD_KEY não configurado! Execute "npm run setup-fields" para descobrir o hash.`);
       return;
     }
 
-    // Obtém o valor atual e anterior do CNPJ
-    const currentCNPJ = data ? data[cnpjFieldKey] : null;
-    const previousCNPJ = previous ? previous[cnpjFieldKey] : null;
+    // Em 'change', "previous.custom_fields" só lista as chaves que mudaram de fato.
+    // Se o CNPJ não estiver lá, foi outro campo que mudou (inclusive nossa própria
+    // gravação dos demais campos) — ignoramos para não reprocessar em loop.
+    if (action === 'change') {
+      const previousFields = previous ? previous.custom_fields : null;
+      const cnpjMudou = !!previousFields && Object.prototype.hasOwnProperty.call(previousFields, cnpjFieldKey);
+      if (!cnpjMudou) {
+        logger.debug('Campo CNPJ não foi o que mudou neste evento, ignorando');
+        return;
+      }
+    }
 
-    // Verifica se o campo CNPJ mudou
-    if (!currentCNPJ || currentCNPJ === previousCNPJ) {
-      logger.debug('Campo CNPJ não mudou ou está vazio, ignorando');
+    const currentCNPJ = getCustomFieldValue(data.custom_fields, cnpjFieldKey);
+    if (!currentCNPJ) {
+      logger.debug('Campo CNPJ está vazio, ignorando');
       return;
     }
 
@@ -69,7 +106,7 @@ router.post('/webhook', async (req, res) => {
       return;
     }
 
-    logger.info(`CNPJ válido detectado: ${cleanedCNPJ} (entidade: ${entityType}, ID: ${data.id})`);
+    logger.info(`CNPJ válido detectado: ${cleanedCNPJ} (entidade: ${entityType}, ID: ${entityId})`);
 
     // Consulta dados na ReceitaWS (com fallback BrasilAPI)
     const dadosEmpresa = await consultarCNPJ(cleanedCNPJ);
@@ -91,9 +128,9 @@ router.post('/webhook', async (req, res) => {
 
     // Atualiza a entidade no Pipedrive
     if (entityType === 'organization') {
-      await updateOrganization(data.id, customFields);
+      await updateOrganization(entityId, customFields);
     } else {
-      await updateDeal(data.id, customFields);
+      await updateDeal(entityId, customFields);
     }
 
     logger.info(`✅ Campos atualizados com sucesso para CNPJ ${cleanedCNPJ}!`);
